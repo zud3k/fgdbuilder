@@ -1,0 +1,11 @@
+Makefile*
+*.o
+*.user
+.qmake.stash
+debug/
+release/
+moc_*
+qrc_*
+ui_*
+/fgdbuilder
+/fgdbuilder.exe

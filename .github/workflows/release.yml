@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        run: |
+          version=$(sed -n 's/^VERSION = //p' fgdbuilder.pro)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match VERSION $version in fgdbuilder.pro"
+            exit 1
+          fi
+
+      - name: Install Qt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-base-dev qmake6 build-essential
+
+      - name: Build
+        run: |
+          qmake6 fgdbuilder.pro CONFIG+=release
+          make -j"$(nproc)"
+
+      - name: Smoke test
+        run: ./fgdbuilder --version
+
+      - name: Package
+        run: |
+          name="fgdbuilder-${{ steps.ver.outputs.version }}-linux-x86_64"
+          mkdir "$name"
+          cp fgdbuilder LICENSE README.md "$name/"
+          tar -czf "$name.tar.gz" "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: fgdbuilder-*-linux-x86_64.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          suppress-deprecation-warnings: msystem-mingw64
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-qt6-base
+            mingw-w64-x86_64-qt6-tools
+
+      - name: Read version
+        id: ver
+        run: |
+          version=$(sed -n 's/^VERSION = //p' fgdbuilder.pro)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match VERSION $version in fgdbuilder.pro"
+            exit 1
+          fi
+
+      - name: Show toolchain
+        run: |
+          pacman -Q | grep -i -E "qt6|make|toolchain" || true
+          ls /mingw64/bin | grep -i -E "qmake|make|windeployqt" || true
+
+      - name: Build
+        run: |
+          qmake=$(command -v qmake6 || command -v qmake-qt6 || command -v qmake || find /mingw64 -iname 'qmake*.exe' | head -n 1)
+          make_tool=$(command -v mingw32-make || command -v make)
+          echo "qmake: $qmake"
+          echo "make: $make_tool"
+          "$qmake" --version
+          "$qmake" fgdbuilder.pro CONFIG+=release
+          "$make_tool" -j"$(nproc)"
+          ls -la release
+
+      - name: Collect files
+        run: |
+          name="fgdbuilder-${{ steps.ver.outputs.version }}-windows-x86_64"
+          mkdir "$name"
+          cp release/fgdbuilder.exe LICENSE README.md "$name/"
+          deploy=$(command -v windeployqt6 || command -v windeployqt || find /mingw64 -iname 'windeployqt*.exe' | head -n 1)
+          echo "windeployqt: $deploy"
+          "$deploy" --release --no-translations "$name/fgdbuilder.exe"
+          for pass in 1 2; do
+            for f in "$name/fgdbuilder.exe" $(find "$name" -name '*.dll'); do
+              ldd "$f" | awk '/\/mingw64\//{print $3}'
+            done | sort -u | while read -r dll; do
+              cp -n "$dll" "$name/"
+            done
+          done
+          echo "package=$name" >> "$GITHUB_ENV"
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path "${{ env.package }}" -DestinationPath "${{ env.package }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: fgdbuilder-*-windows-x86_64.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
